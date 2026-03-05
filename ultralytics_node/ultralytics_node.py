@@ -1,0 +1,141 @@
+from __future__ import annotations
+
+import os
+import threading
+from typing import Dict
+
+import numpy as np
+import rclpy
+import torch
+from rclpy.node import Node
+
+from detector_interfaces.srv import RunUltralyticsInfer
+
+
+class UltralyticsServiceNode(Node):
+    def __init__(self) -> None:
+        super().__init__('ultralytics_infer_node')
+
+        self.service_name = self.declare_parameter('service_name', '/ultralytics/infer').value
+        self.default_imgsz = int(self.declare_parameter('default_imgsz', 736).value)
+        self.device = self._select_device()
+
+        self._models: Dict[str, object] = {}
+        self._lock = threading.Lock()
+
+        self.create_service(RunUltralyticsInfer, self.service_name, self._on_infer_request)
+        self.get_logger().info(
+            f'Ultralytics service ready on {self.service_name}, device={self.device}, default_imgsz={self.default_imgsz}'
+        )
+
+    def _select_device(self) -> str:
+        device_env = os.environ.get('YOLO_DEVICE')
+        if device_env:
+            return device_env
+        return 'cuda:0' if torch.cuda.is_available() else 'cpu'
+
+    @staticmethod
+    def _imgmsg_to_cv2(msg, desired_encoding='bgr8') -> np.ndarray:
+        raw_image = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
+
+        if msg.encoding == desired_encoding:
+            return raw_image
+
+        # Keep aligned with detector utils.py supported encodings.
+        if msg.encoding == 'rgb8' and desired_encoding == 'bgr8':
+            import cv2
+
+            return cv2.cvtColor(raw_image, cv2.COLOR_RGB2BGR)
+
+        raise RuntimeError(f'Unknown encoding transform: {msg.encoding} -> {desired_encoding}')
+
+    def _resolve_model(self, model_path: str):
+        with self._lock:
+            model = self._models.get(model_path)
+            if model is not None:
+                return model
+
+            from ultralytics import YOLO
+
+            model = YOLO(model_path, task='detect')
+            if not model_path.endswith(('.engine', '.onnx')):
+                model.fuse()
+
+            if torch.cuda.is_available() and model_path.endswith('.pt'):
+                if hasattr(model, 'model') and hasattr(model.model, 'to'):
+                    model.model.to(self.device)
+                elif hasattr(model, 'to'):
+                    model.to(self.device)
+
+            dummy = np.zeros((self.default_imgsz, self.default_imgsz, 3), dtype=np.uint8)
+            try:
+                _ = model(dummy, imgsz=self.default_imgsz, device=self.device, verbose=False)
+            except Exception:
+                try:
+                    _ = model(dummy, verbose=False)
+                except Exception:
+                    pass
+
+            self._models[model_path] = model
+            self.get_logger().info(f'Loaded model: {model_path}')
+            return model
+
+    def _on_infer_request(self, request: RunUltralyticsInfer.Request, response: RunUltralyticsInfer.Response):
+        model_path = request.model_path.strip()
+        if not model_path:
+            response.success = False
+            response.message = 'model_path is empty'
+            return response
+
+        try:
+            image = self._imgmsg_to_cv2(request.image, desired_encoding='bgr8')
+        except Exception as exc:
+            response.success = False
+            response.message = f'invalid image: {exc}'
+            return response
+
+        imgsz = int(request.imgsz) if request.imgsz > 0 else self.default_imgsz
+
+        try:
+            model = self._resolve_model(model_path)
+            with self._lock:
+                results = model(image, imgsz=imgsz, device=self.device, verbose=False)[0]
+
+            boxes = getattr(results, 'boxes', None)
+            if boxes is None or boxes.conf.numel() == 0:
+                response.success = True
+                response.message = 'OK'
+                response.boxes_xyxy = []
+                response.class_ids = []
+                response.confidences = []
+                return response
+
+            boxes_xyxy = boxes.xyxy.cpu().numpy().astype(np.float32)
+            classes = boxes.cls.cpu().numpy().astype(np.int32)
+            confidences = boxes.conf.cpu().numpy().astype(np.float32)
+
+            response.success = True
+            response.message = 'OK'
+            response.boxes_xyxy = boxes_xyxy.reshape(-1).tolist()
+            response.class_ids = classes.tolist()
+            response.confidences = confidences.tolist()
+            return response
+        except Exception as exc:
+            response.success = False
+            response.message = f'inference error: {exc}'
+            self.get_logger().error(f'Inference failed for model {model_path}: {exc}')
+            return response
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = UltralyticsServiceNode()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
