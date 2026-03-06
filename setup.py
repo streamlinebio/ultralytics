@@ -1,6 +1,6 @@
 from setuptools import setup, find_packages
 
-package_name = 'ultralytics_ros'
+package_name = 'ultralytics'
 
 setup(
     name=package_name,

@@ -7,23 +7,24 @@ from typing import Dict
 import numpy as np
 import rclpy
 import torch
+import cv2
 from rclpy.node import Node
+from ultralytics import YOLO
 
-from detector_interfaces.srv import RunUltralyticsInfer
+from detector_interfaces.srv import RunUltralyticsDetect
 
 
 class UltralyticsServiceNode(Node):
     def __init__(self) -> None:
         super().__init__('ultralytics_infer_node')
 
-        self.service_name = self.declare_parameter('service_name', '/ultralytics/infer').value
+        self.service_name = self.declare_parameter('service_name', '/ultralytics/detect').value
         self.default_imgsz = int(self.declare_parameter('default_imgsz', 736).value)
         self.device = self._select_device()
 
-        self._models: Dict[str, object] = {}
         self._lock = threading.Lock()
 
-        self.create_service(RunUltralyticsInfer, self.service_name, self._on_infer_request)
+        self.create_service(RunUltralyticsDetect, self.service_name, self.run_detect)
         self.get_logger().info(
             f'Ultralytics service ready on {self.service_name}, device={self.device}, default_imgsz={self.default_imgsz}'
         )
@@ -36,27 +37,20 @@ class UltralyticsServiceNode(Node):
 
     @staticmethod
     def _imgmsg_to_cv2(msg, desired_encoding='bgr8') -> np.ndarray:
+        """Convert from ROS2 msg to cv2 image."""
         raw_image = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
 
         if msg.encoding == desired_encoding:
             return raw_image
 
-        # Keep aligned with detector utils.py supported encodings.
         if msg.encoding == 'rgb8' and desired_encoding == 'bgr8':
-            import cv2
-
             return cv2.cvtColor(raw_image, cv2.COLOR_RGB2BGR)
 
         raise RuntimeError(f'Unknown encoding transform: {msg.encoding} -> {desired_encoding}')
 
     def _resolve_model(self, model_path: str):
+        """Get ultralytics yolo detection model."""
         with self._lock:
-            model = self._models.get(model_path)
-            if model is not None:
-                return model
-
-            from ultralytics import YOLO
-
             model = YOLO(model_path, task='detect')
             if not model_path.endswith(('.engine', '.onnx')):
                 model.fuse()
@@ -67,6 +61,7 @@ class UltralyticsServiceNode(Node):
                 elif hasattr(model, 'to'):
                     model.to(self.device)
 
+            # Model warm-up
             dummy = np.zeros((self.default_imgsz, self.default_imgsz, 3), dtype=np.uint8)
             try:
                 _ = model(dummy, imgsz=self.default_imgsz, device=self.device, verbose=False)
@@ -76,11 +71,11 @@ class UltralyticsServiceNode(Node):
                 except Exception:
                     pass
 
-            self._models[model_path] = model
             self.get_logger().info(f'Loaded model: {model_path}')
             return model
 
-    def _on_infer_request(self, request: RunUltralyticsInfer.Request, response: RunUltralyticsInfer.Response):
+    def run_detect(self, request: RunUltralyticsDetect.Request, response: RunUltralyticsDetect.Response):
+        """Run yolo detection given model path."""
         model_path = request.model_path.strip()
         if not model_path:
             response.success = False
