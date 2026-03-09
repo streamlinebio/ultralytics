@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import Dict
 
 import numpy as np
@@ -23,6 +24,10 @@ class UltralyticsServiceNode(Node):
         self.device = self._select_device()
 
         self._lock = threading.Lock()
+        self._model_cache: Dict[str, YOLO] = {}
+        self._last_resolve_time = 0.0
+        self._cache_ttl_sec = 30.0
+        self._cache_cleanup_timer = self.create_timer(1.0, self._cleanup_model_cache)
 
         self.create_service(RunUltralyticsDetect, self.service_name, self.run_detect)
         self.get_logger().info(
@@ -51,6 +56,11 @@ class UltralyticsServiceNode(Node):
     def _resolve_model(self, model_path: str):
         """Get ultralytics yolo detection model."""
         with self._lock:
+            self._last_resolve_time = time.monotonic()
+            cached_model = self._model_cache.get(model_path)
+            if cached_model is not None:
+                return cached_model
+
             model = YOLO(model_path, task='detect')
             if not model_path.endswith(('.engine', '.onnx')):
                 model.fuse()
@@ -71,8 +81,24 @@ class UltralyticsServiceNode(Node):
                 except Exception:
                     pass
 
+            self._model_cache[model_path] = model
             self.get_logger().info(f'Loaded model: {model_path}')
             return model
+
+    def _cleanup_model_cache(self) -> None:
+        """Release cache model after sepcific duration from last action called."""
+        with self._lock:
+            if not self._model_cache:
+                return
+
+            idle_sec = time.monotonic() - self._last_resolve_time
+            if idle_sec < self._cache_ttl_sec:
+                return
+
+            self._model_cache.clear()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            self.get_logger().info('Unloaded cached models after 30 seconds of resolve inactivity')
 
     def run_detect(self, request: RunUltralyticsDetect.Request, response: RunUltralyticsDetect.Response):
         """Run yolo detection given model path."""
