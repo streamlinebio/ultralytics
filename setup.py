@@ -13,7 +13,7 @@ setup(
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='Sam',
-    maintainer_email='sam@example.com',
+    maintainer_email='sam@streamlinebio.ai',
     description='Ultralytics inference service node for detector pipeline',
     license='MIT',
     tests_require=['pytest'],
