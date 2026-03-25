@@ -43,3 +43,10 @@ make up-ultralytics
 
 ## Integration with Detector
 - `detector` handlers call this service for every inference frame.
+
+## License
+Copyright (C) 2026 Shang-Yi Yu
+
+This project is licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE).
+
+If you use this software over a network, you must make the complete corresponding source code available to users.

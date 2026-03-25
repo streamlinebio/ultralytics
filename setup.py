@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Shang-Yi Yu
+# SPDX-License-Identifier: AGPL-3.0-only
+
 from setuptools import setup, find_packages
 
 package_name = 'ultralytics'
@@ -15,7 +18,7 @@ setup(
     maintainer='Sam',
     maintainer_email='sam@streamlinebio.ai',
     description='Ultralytics inference service node for detector pipeline',
-    license='MIT',
+    license='AGPL-3.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
