@@ -22,7 +22,7 @@ class UltralyticsServiceNode(Node):
     def __init__(self) -> None:
         super().__init__('ultralytics_infer_node')
 
-        self.service_name = self.declare_parameter('service_name', '/ultralytics/detect').value
+        self.detection_service_name = self.declare_parameter('detection_service_name', '/ultralytics/detect').value
         self.segment_service_name = self.declare_parameter(
             'segment_service_name',
             '/ultralytics/segment',
@@ -36,10 +36,10 @@ class UltralyticsServiceNode(Node):
         self._cache_ttl_sec = 30.0
         self._cache_cleanup_timer = self.create_timer(1.0, self._cleanup_model_cache)
 
-        self.create_service(RunUltralyticsDetect, self.service_name, self.run_detect)
+        self.create_service(RunUltralyticsDetect, self.detection_service_name, self.run_detect)
         self.create_service(RunUltralyticsSegment, self.segment_service_name, self.run_segment)
         self.get_logger().info(
-            f'Ultralytics service ready on {self.service_name}, device={self.device}, default_imgsz={self.default_imgsz}'
+            f'Ultralytics service ready on {self.detection_service_name}, device={self.device}, default_imgsz={self.default_imgsz}'
         )
         self.get_logger().info(f'Ultralytics segmentation service ready on {self.segment_service_name}')
 
@@ -162,7 +162,7 @@ class UltralyticsServiceNode(Node):
         request: RunUltralyticsSegment.Request,
         response: RunUltralyticsSegment.Response,
     ):
-        """Run yolo segmentation given model path and return raw masks."""
+        """Run yolo segmentation and return raw masks."""
         model_path = request.model_path.strip()
         if not model_path:
             response.success = False
