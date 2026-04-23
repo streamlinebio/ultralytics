@@ -13,8 +13,10 @@ import rclpy
 import torch
 import cv2
 from rclpy.node import Node
+from sensor_msgs.msg import Image
 from ultralytics import YOLO
 
+from detector_interfaces.msg import UltralyticsDetections
 from detector_interfaces.srv import RunUltralyticsDetect
 
 
@@ -23,18 +25,26 @@ class UltralyticsServiceNode(Node):
         super().__init__('ultralytics_infer_node')
 
         self.service_name = self.declare_parameter('service_name', '/ultralytics/detect').value
+        self.input_image_topic = self.declare_parameter(
+            'input_image_topic', '/camera/realsense/color/image_rect_raw'
+        ).value
+        self.output_topic = self.declare_parameter('output_topic', '/ultralytics/detection_results').value
         self.default_imgsz = int(self.declare_parameter('default_imgsz', 736).value)
         self.device = self._select_device()
 
         self._lock = threading.Lock()
         self._model_cache: Dict[str, YOLO] = {}
+        self._latest_image: np.ndarray | None = None
         self._last_resolve_time = 0.0
         self._cache_ttl_sec = 30.0
         self._cache_cleanup_timer = self.create_timer(1.0, self._cleanup_model_cache)
 
+        self.create_subscription(Image, self.input_image_topic, self._image_callback, 10)
+        self.detection_publisher = self.create_publisher(UltralyticsDetections, self.output_topic, 10)
         self.create_service(RunUltralyticsDetect, self.service_name, self.run_detect)
         self.get_logger().info(
-            f'Ultralytics service ready on {self.service_name}, device={self.device}, default_imgsz={self.default_imgsz}'
+            f'Ultralytics service ready on {self.service_name}, image_topic={self.input_image_topic}, '
+            f'output_topic={self.output_topic}, device={self.device}, default_imgsz={self.default_imgsz}'
         )
 
     def _select_device(self) -> str:
@@ -55,6 +65,16 @@ class UltralyticsServiceNode(Node):
             return cv2.cvtColor(raw_image, cv2.COLOR_RGB2BGR)
 
         raise RuntimeError(f'Unknown encoding transform: {msg.encoding} -> {desired_encoding}')
+
+    def _image_callback(self, msg: Image) -> None:
+        try:
+            image = self._imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as exc:
+            self.get_logger().error(f'Failed to decode input image on {self.input_image_topic}: {exc}')
+            return
+
+        with self._lock:
+            self._latest_image = image.copy()
 
     def _resolve_model(self, model_path: str):
         """Get ultralytics yolo detection model."""
@@ -104,19 +124,19 @@ class UltralyticsServiceNode(Node):
             self.get_logger().info('Unloaded cached models after 30 seconds of resolve inactivity')
 
     def run_detect(self, request: RunUltralyticsDetect.Request, response: RunUltralyticsDetect.Response):
-        """Run yolo detection given model path."""
+        """Run yolo detection with the latest subscribed image and publish outputs to a topic."""
         model_path = request.model_path.strip()
         if not model_path:
             response.success = False
             response.message = 'model_path is empty'
             return response
 
-        try:
-            image = self._imgmsg_to_cv2(request.image, desired_encoding='bgr8')
-        except Exception as exc:
-            response.success = False
-            response.message = f'invalid image: {exc}'
-            return response
+        with self._lock:
+            if self._latest_image is None:
+                response.success = False
+                response.message = f'no image received on topic: {self.input_image_topic}'
+                return response
+            image = self._latest_image.copy()
 
         imgsz = int(request.imgsz) if request.imgsz > 0 else self.default_imgsz
 
@@ -127,22 +147,23 @@ class UltralyticsServiceNode(Node):
 
             boxes = getattr(results, 'boxes', None)
             if boxes is None or boxes.conf.numel() == 0:
-                response.success = True
-                response.message = 'OK'
-                response.boxes_xyxy = []
-                response.class_ids = []
-                response.confidences = []
-                return response
+                boxes_xyxy = np.empty((0,), dtype=np.float32)
+                classes = np.empty((0,), dtype=np.int32)
+                confidences = np.empty((0,), dtype=np.float32)
+            else:
+                boxes_xyxy = boxes.xyxy.cpu().numpy().astype(np.float32).reshape(-1)
+                classes = boxes.cls.cpu().numpy().astype(np.int32)
+                confidences = boxes.conf.cpu().numpy().astype(np.float32)
 
-            boxes_xyxy = boxes.xyxy.cpu().numpy().astype(np.float32)
-            classes = boxes.cls.cpu().numpy().astype(np.int32)
-            confidences = boxes.conf.cpu().numpy().astype(np.float32)
+            detection_msg = UltralyticsDetections()
+            detection_msg.stamp = self.get_clock().now().to_msg()
+            detection_msg.boxes_xyxy = boxes_xyxy.tolist()
+            detection_msg.class_ids = classes.tolist()
+            detection_msg.confidences = confidences.tolist()
+            self.detection_publisher.publish(detection_msg)
 
             response.success = True
             response.message = 'OK'
-            response.boxes_xyxy = boxes_xyxy.reshape(-1).tolist()
-            response.class_ids = classes.tolist()
-            response.confidences = confidences.tolist()
             return response
         except Exception as exc:
             response.success = False

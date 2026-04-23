@@ -1,24 +1,28 @@
 ## Ultralytics
-`ultralytics` is a standalone ROS 2 service package used by `detector` for YOLO inference.
+`ultralytics` is a standalone ROS 2 package used by `detector` for YOLO inference.
 
 ## Purpose
 - In charge of pure ultralytics inferece
 - Reuse loaded models through in-memory cache
 
-## Service Interface
+## Interfaces
 Service type: `detector_interfaces/srv/RunUltralyticsDetect`
 
 Request:
 1. `model_path`
-2. `image` (`sensor_msgs/Image`)
-3. `imgsz`
+2. `imgsz`
 
 Response:
 1. `success`
 2. `message`
-3. `boxes_xyxy` (flattened float array, 4 values per box)
-4. `class_ids`
-5. `confidences`
+
+Topic output type: `detector_interfaces/msg/UltralyticsDetections`
+1. `stamp`
+2. `boxes_xyxy` (flattened float array, 4 values per box)
+3. `class_ids`
+4. `confidences`
+
+Topic input type: `sensor_msgs/msg/Image` (configured by `input_image_topic`)
 
 ## Runtime Behavior
 - Model loading:
@@ -42,7 +46,8 @@ make up-ultralytics
 ```
 
 ## Integration with Detector
-- `detector` handlers call this service for every inference frame.
+- `detector` handlers call the service for each inference trigger.
+- Actual box/class/conf outputs are delivered on the detections topic.
 
 ## License
 Copyright (C) 2026 Shang-Yi Yu
