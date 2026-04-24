@@ -56,7 +56,14 @@ class UltralyticsServiceNode(Node):
     @staticmethod
     def _imgmsg_to_cv2(msg, desired_encoding='bgr8') -> np.ndarray:
         """Convert from ROS2 msg to cv2 image."""
-        raw_image = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
+        channels = 3
+        row_pixel_bytes = msg.width * channels # valid pixel bytes per row (excluding padding)
+        expected_data_size = msg.height * msg.step # total buffer size including row padding
+
+        # reshape raw buffer into (H, step) to preserve stride/padding
+        raw = np.frombuffer(msg.data, dtype=np.uint8, count=expected_data_size).reshape(msg.height, msg.step)
+        # remove padding (if any) and reshape into standard (H, W, C) image
+        raw_image = raw[:, :row_pixel_bytes].reshape(msg.height, msg.width, channels)
 
         if msg.encoding == desired_encoding:
             return raw_image
