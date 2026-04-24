@@ -12,6 +12,8 @@ import numpy as np
 import rclpy
 import torch
 import cv2
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from ultralytics import YOLO
@@ -32,16 +34,27 @@ class UltralyticsServiceNode(Node):
         self.default_imgsz = int(self.declare_parameter('default_imgsz', 736).value)
         self.device = self._select_device()
 
-        self._lock = threading.Lock()
+        self._image_lock = threading.Lock()
+        self._model_lock = threading.Lock()
         self._model_cache: Dict[str, YOLO] = {}
         self._latest_image: np.ndarray | None = None
         self._last_resolve_time = 0.0
         self._cache_ttl_sec = 30.0
-        self._cache_cleanup_timer = self.create_timer(1.0, self._cleanup_model_cache)
+        self._image_cb_group = MutuallyExclusiveCallbackGroup()
+        self._service_cb_group = MutuallyExclusiveCallbackGroup()
+        self._timer_cb_group = MutuallyExclusiveCallbackGroup()
 
-        self.create_subscription(Image, self.input_image_topic, self._image_callback, 10)
+        self._cache_cleanup_timer = self.create_timer(
+            1.0, self._cleanup_model_cache, callback_group=self._timer_cb_group
+        )
+
+        self.create_subscription(
+            Image, self.input_image_topic, self._image_callback, 10, callback_group=self._image_cb_group
+        )
         self.detection_publisher = self.create_publisher(UltralyticsDetections, self.output_topic, 10)
-        self.create_service(RunUltralyticsDetect, self.service_name, self.run_detect)
+        self.create_service(
+            RunUltralyticsDetect, self.service_name, self.run_detect, callback_group=self._service_cb_group
+        )
         self.get_logger().info(
             f'Ultralytics service ready on {self.service_name}, image_topic={self.input_image_topic}, '
             f'output_topic={self.output_topic}, device={self.device}, default_imgsz={self.default_imgsz}'
@@ -80,12 +93,12 @@ class UltralyticsServiceNode(Node):
             self.get_logger().error(f'Failed to decode input image on {self.input_image_topic}: {exc}')
             return
 
-        with self._lock:
+        with self._image_lock:
             self._latest_image = image.copy()
 
     def _resolve_model(self, model_path: str):
         """Get ultralytics yolo detection model."""
-        with self._lock:
+        with self._model_lock:
             self._last_resolve_time = time.monotonic()
             cached_model = self._model_cache.get(model_path)
             if cached_model is not None:
@@ -117,7 +130,7 @@ class UltralyticsServiceNode(Node):
 
     def _cleanup_model_cache(self) -> None:
         """Release cache model after sepcific duration from last action called."""
-        with self._lock:
+        with self._model_lock:
             if not self._model_cache:
                 return
 
@@ -138,7 +151,7 @@ class UltralyticsServiceNode(Node):
             response.message = 'model_path is empty'
             return response
 
-        with self._lock:
+        with self._image_lock:
             if self._latest_image is None:
                 response.success = False
                 response.message = f'no image received on topic: {self.input_image_topic}'
@@ -149,7 +162,7 @@ class UltralyticsServiceNode(Node):
 
         try:
             model = self._resolve_model(model_path)
-            with self._lock:
+            with self._model_lock:
                 results = model(image, imgsz=imgsz, device=self.device, verbose=False)[0]
 
             boxes = getattr(results, 'boxes', None)
@@ -182,9 +195,12 @@ class UltralyticsServiceNode(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = UltralyticsServiceNode()
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 
