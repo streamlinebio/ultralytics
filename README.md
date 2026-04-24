@@ -42,7 +42,7 @@ make load-desktop
 make load-jetson
 
 make build
-make up-ultralytics
+make up-detector
 ```
 
 ## Integration with Detector
