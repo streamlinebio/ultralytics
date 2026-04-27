@@ -177,6 +177,7 @@ class UltralyticsServiceNode(Node):
 
             detection_msg = UltralyticsDetections()
             detection_msg.stamp = self.get_clock().now().to_msg()
+            detection_msg.request_id = request.request_id
             detection_msg.boxes_xyxy = boxes_xyxy.tolist()
             detection_msg.class_ids = classes.tolist()
             detection_msg.confidences = confidences.tolist()
