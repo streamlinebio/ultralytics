@@ -6,23 +6,31 @@
 - Reuse loaded models through in-memory cache
 
 ## Interfaces
-### Detection Service
-Service name: `/ultralytics/detect`  
-Service type: `detector_interfaces/srv/RunUltralyticsDetect`
+### Detection Stream Action
+Action name: `/ultralytics/detect_stream`  
+Action type: `detector_interfaces/action/RunUltralyticsStream`
 
-Request:
-1. `model_path`
-2. `imgsz`
+Goal:
+1. `model_paths`
+2. `fps`
 
-Response:
+Result:
 1. `success`
 2. `message`
+3. `frames_processed`
+
+Feedback:
+1. `frames_processed`
+2. `elapsed`
 
 Topic output type: `detector_interfaces/msg/UltralyticsDetections`
 1. `stamp`
-2. `boxes_xyxy` (flattened float array, 4 values per box)
-3. `class_ids`
-4. `confidences`
+2. `goal_id`
+3. `model_path`
+4. `frame_seq`
+5. `boxes_xyxy` (flattened float array, 4 values per box)
+6. `class_ids`
+7. `confidences`
 
 Topic input type: `sensor_msgs/msg/Image` (configured by `input_image_topic`)
 
@@ -68,7 +76,7 @@ make up-detector
 ```
 
 ## Integration with Detector
-- `detector` handlers call the service for each inference trigger.
+- `detector` handlers start one stream action per detector action goal.
 - Actual box/class/conf outputs are delivered on the detections topic.
 
 ## Integration with Pose Estimator
