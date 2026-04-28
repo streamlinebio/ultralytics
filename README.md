@@ -1,26 +1,30 @@
 ## Ultralytics
-`ultralytics` is a standalone ROS 2 service package for YOLO inference.
+`ultralytics` is a standalone ROS 2 package used by `detector` for YOLO inference.
 
 ## Purpose
 - In charge of pure ultralytics inference
 - Reuse loaded models through in-memory cache
 
-## Service Interfaces
+## Interfaces
 ### Detection Service
 Service name: `/ultralytics/detect`  
 Service type: `detector_interfaces/srv/RunUltralyticsDetect`
 
 Request:
 1. `model_path`
-2. `image` (`sensor_msgs/Image`)
-3. `imgsz`
+2. `imgsz`
 
 Response:
 1. `success`
 2. `message`
-3. `boxes_xyxy` (flattened float array, 4 values per box)
-4. `class_ids`
-5. `confidences`
+
+Topic output type: `detector_interfaces/msg/UltralyticsDetections`
+1. `stamp`
+2. `boxes_xyxy` (flattened float array, 4 values per box)
+3. `class_ids`
+4. `confidences`
+
+Topic input type: `sensor_msgs/msg/Image` (configured by `input_image_topic`)
 
 ### Segmentation Service
 Service name: `/ultralytics/segment`  
@@ -28,8 +32,7 @@ Service type: `detector_interfaces/srv/RunUltralyticsSegment`
 
 Request:
 1. `model_path`
-2. `image` (`sensor_msgs/Image`)
-3. `imgsz`
+2. `imgsz`
 
 Response:
 1. `success`
@@ -61,14 +64,16 @@ make load-desktop
 make load-jetson
 
 make build
-make up-ultralytics
+make up-detector
 ```
 
 ## Integration with Detector
-- `detector` handlers call this service for every inference frame.
+- `detector` handlers call the service for each inference trigger.
+- Actual box/class/conf outputs are delivered on the detections topic.
 
 ## Integration with Pose Estimator
 - `pose_estimator` handlers call `/ultralytics/segment` for mask inference.
+- Segmentation uses the latest image from `input_image_topic` and returns boxes/classes/confidences/masks in the service response.
 
 ## License
 Copyright (C) 2026 Shang-Yi Yu
