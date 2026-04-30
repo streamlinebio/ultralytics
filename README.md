@@ -14,6 +14,10 @@ Goal:
 1. `model_paths`
 2. `fps`
 
+The stream action does not accept a confidence threshold. Detection confidence
+filtering inside Ultralytics uses the library/model default unless this package
+is extended with an explicit inference threshold goal field.
+
 Result:
 1. `success`
 2. `message`
