@@ -88,7 +88,7 @@ make up-detector
 - Segmentation uses the latest image from `input_image_topic` and returns boxes/classes/confidences/masks in the service response.
 
 ## License
-Copyright (C) 2026 Shang-Yi Yu
+Copyright (C) 2026 Shang-Yi Yu, Streamline Bio
 
 This project is licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE).
 
