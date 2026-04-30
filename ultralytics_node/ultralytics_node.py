@@ -19,7 +19,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from ultralytics import YOLO
 
-from detector_interfaces.action import RunUltralyticsStream
+from detector_interfaces.action import RunUltralyticsDetect
 from detector_interfaces.msg import UltralyticsDetections
 from detector_interfaces.srv import RunUltralyticsSegment
 
@@ -64,7 +64,7 @@ class UltralyticsServiceNode(Node):
         self.detection_publisher = self.create_publisher(UltralyticsDetections, self.output_topic, 10)
         self.stream_action_server = ActionServer(
             self,
-            RunUltralyticsStream,
+            RunUltralyticsDetect,
             self.action_name,
             execute_callback=self.run_detect_stream,
             goal_callback=self._on_stream_goal,
@@ -210,7 +210,7 @@ class UltralyticsServiceNode(Node):
         detection_msg.confidences = confidences.tolist()
         self.detection_publisher.publish(detection_msg)
 
-    def _on_stream_goal(self, goal_request: RunUltralyticsStream.Goal) -> GoalResponse:
+    def _on_stream_goal(self, goal_request: RunUltralyticsDetect.Goal) -> GoalResponse:
         """Accept one active Ultralytics stream goal at a time."""
         model_paths = [model_path.strip() for model_path in goal_request.model_paths if model_path.strip()]
         if not model_paths:
@@ -229,7 +229,7 @@ class UltralyticsServiceNode(Node):
         """Allow clients to stop an active inference stream."""
         return CancelResponse.ACCEPT
 
-    def run_detect_stream(self, goal_handle) -> RunUltralyticsStream.Result:
+    def run_detect_stream(self, goal_handle) -> RunUltralyticsDetect.Result:
         """Run YOLO detection while the action goal is active and publish results to a topic."""
         request = goal_handle.request
         model_paths = [model_path.strip() for model_path in request.model_paths if model_path.strip()]
@@ -239,7 +239,7 @@ class UltralyticsServiceNode(Node):
         frames_processed = 0
         last_processed_image_version = 0
         t_start = time.monotonic()
-        result = RunUltralyticsStream.Result()
+        result = RunUltralyticsDetect.Result()
 
         self.get_logger().info(
             f'Ultralytics stream started: models={model_paths}, fps={fps:.2f}, imgsz={imgsz}'
@@ -283,7 +283,7 @@ class UltralyticsServiceNode(Node):
                     )
                 frames_processed += 1
 
-                feedback = RunUltralyticsStream.Feedback()
+                feedback = RunUltralyticsDetect.Feedback()
                 feedback.frames_processed = frames_processed
                 feedback.elapsed = float(time.monotonic() - t_start)
                 goal_handle.publish_feedback(feedback)

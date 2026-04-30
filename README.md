@@ -8,7 +8,7 @@
 ## Interfaces
 ### Detection Stream Action
 Action name: `/ultralytics/detect_stream`  
-Action type: `detector_interfaces/action/RunUltralyticsStream`
+Action type: `detector_interfaces/action/RunUltralyticsDetect`
 
 Goal:
 1. `model_paths`
