@@ -170,9 +170,13 @@ class UltralyticsServiceNode(Node):
 
     def _run_detect_model(self, model_path: str, image: np.ndarray, imgsz: int):
         """Run one YOLO detect inference and return flattened detection arrays."""
-        model = self._resolve_model(model_path, task='detect')
-        with self._model_lock:
-            results = model(image, imgsz=imgsz, device=self.device, verbose=False)[0]
+        try:
+            model = self._resolve_model(model_path, task='detect')
+            with self._model_lock:
+                results = model(image, imgsz=imgsz, device=self.device, verbose=False)[0]
+        except Exception as exc:
+            self.get_logger().error(f'YOLO detect inference failed for model {model_path}: {exc}')
+            raise
 
         boxes = getattr(results, 'boxes', None)
         if boxes is None or boxes.conf.numel() == 0:
@@ -187,6 +191,18 @@ class UltralyticsServiceNode(Node):
             boxes.cls.cpu().numpy().astype(np.int32),
             boxes.conf.cpu().numpy().astype(np.float32),
         )
+
+    def _run_segment_model(self, model_path: str, image: np.ndarray, imgsz: int):
+        """Run one YOLO segment inference and return raw boxes and masks."""
+        try:
+            model = self._resolve_model(model_path, task='segment')
+            with self._model_lock:
+                results = model(image, imgsz=imgsz, device=self.device, verbose=False)[0]
+        except Exception as exc:
+            self.get_logger().error(f'YOLO segment inference failed for model {model_path}: {exc}')
+            raise
+
+        return getattr(results, 'boxes', None), getattr(results, 'masks', None)
 
     def _publish_detection(
         self,
@@ -252,8 +268,8 @@ class UltralyticsServiceNode(Node):
             while rclpy.ok():
                 if goal_handle.is_cancel_requested:
                     goal_handle.canceled()
-                    result.success = False
-                    result.message = 'Stream cancelled'
+                    result.success = True
+                    result.message = 'Stream stopped due to detector side request.'
                     return result
 
                 # Ensure inferenced image is new from image topic
@@ -334,12 +350,7 @@ class UltralyticsServiceNode(Node):
         imgsz = int(request.imgsz) if request.imgsz > 0 else self.default_imgsz
 
         try:
-            model = self._resolve_model(model_path, task='segment')
-            with self._model_lock:
-                results = model(image, imgsz=imgsz, device=self.device, verbose=False)[0]
-
-            boxes = getattr(results, 'boxes', None)
-            masks = getattr(results, 'masks', None)
+            boxes, masks = self._run_segment_model(model_path, image, imgsz)
             if boxes is None or boxes.conf.numel() == 0 or masks is None or masks.data.numel() == 0:
                 response.success = True
                 response.message = 'OK'
