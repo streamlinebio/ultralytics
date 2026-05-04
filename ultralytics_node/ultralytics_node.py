@@ -27,7 +27,7 @@ class UltralyticsServiceNode(Node):
     def __init__(self) -> None:
         super().__init__('ultralytics_infer_node')
 
-        self.action_name = self.declare_parameter('action_name', '/ultralytics/detect_stream').value
+        self.detect_action_name = self.declare_parameter('detect_action_name', '/ultralytics/detect_stream').value
         self.segment_action_name = self.declare_parameter(
             'segment_action_name',
             '/ultralytics/segment_stream',
@@ -68,10 +68,10 @@ class UltralyticsServiceNode(Node):
         )
         self.detection_publisher = self.create_publisher(UltralyticsDetections, self.output_topic, 10)
         self.segment_publisher = self.create_publisher(UltralyticsSegments, self.segment_output_topic, 10)
-        self.stream_action_server = ActionServer(
+        self.detect_stream_action_server = ActionServer(
             self,
             RunUltralyticsDetectStream,
-            self.action_name,
+            self.detect_action_name,
             execute_callback=self.run_detect_stream,
             goal_callback=self._on_stream_goal,
             cancel_callback=self._on_stream_cancel,
@@ -87,7 +87,7 @@ class UltralyticsServiceNode(Node):
             callback_group=self._segment_action_cb_group,
         )
         self.get_logger().info(
-            f'Ultralytics detection stream ready on {self.action_name}, image_topic={self.input_image_topic}, '
+            f'Ultralytics detection stream ready on {self.detect_action_name}, image_topic={self.input_image_topic}, '
             f'output_topic={self.output_topic}, device={self.device}, default_imgsz={self.default_imgsz}'
         )
         self.get_logger().info(
