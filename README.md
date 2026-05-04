@@ -8,7 +8,7 @@
 ## Interfaces
 ### Detection Stream Action
 Action name: `/ultralytics/detect_stream`  
-Action type: `detector_interfaces/action/RunUltralyticsDetect`
+Action type: `detector_interfaces/action/RunUltralyticsDetectStream`
 
 Goal:
 1. `model_paths`
@@ -38,24 +38,35 @@ Topic output type: `detector_interfaces/msg/UltralyticsDetections`
 
 Topic input type: `sensor_msgs/msg/Image` (configured by `input_image_topic`)
 
-### Segmentation Service
-Service name: `/ultralytics/segment`  
-Service type: `detector_interfaces/srv/RunUltralyticsSegment`
+### Segmentation Stream Action
+Action name: `/ultralytics/segment_stream`  
+Action type: `detector_interfaces/action/RunUltralyticsSegmentStream`
 
-Request:
-1. `model_path`
-2. `imgsz`
+Goal:
+1. `model_paths`
+2. `fps`
 
-Response:
+Result:
 1. `success`
 2. `message`
-3. `boxes_xyxy` (flattened float array, 4 values per box)
-4. `class_ids`
-5. `confidences`
-6. `masks_data` (flattened uint8 binary masks)
-7. `masks_count`
-8. `mask_height`
-9. `mask_width`
+3. `frames_processed`
+
+Feedback:
+1. `frames_processed`
+2. `elapsed`
+
+Topic output type: `detector_interfaces/msg/UltralyticsSegments`
+1. `stamp`
+2. `goal_id`
+3. `model_path`
+4. `frame_seq`
+5. `boxes_xyxy` (flattened float array, 4 values per box)
+6. `class_ids`
+7. `confidences`
+8. `masks_data` (flattened uint8 binary masks)
+9. `masks_count`
+10. `mask_height`
+11. `mask_width`
 
 ## Runtime Behavior
 - Model loading:
@@ -84,8 +95,8 @@ make up-detector
 - Actual box/class/conf outputs are delivered on the detections topic.
 
 ## Integration with Pose Estimator
-- `pose_estimator` handlers call `/ultralytics/segment` for mask inference.
-- Segmentation uses the latest image from `input_image_topic` and returns boxes/classes/confidences/masks in the service response.
+- `pose_estimator` starts `/ultralytics/segment_stream` for mask inference.
+- Segmentation uses the latest image from `input_image_topic` and publishes boxes/classes/confidences/masks on the segment results topic.
 
 ## License
 Copyright (C) 2026 Shang-Yi Yu, Streamline Bio
