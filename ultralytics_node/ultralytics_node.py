@@ -19,24 +19,27 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from ultralytics import YOLO
 
-from detector_interfaces.action import RunUltralyticsStream
-from detector_interfaces.msg import UltralyticsDetections
-from detector_interfaces.srv import RunUltralyticsSegment
+from detector_interfaces.action import RunUltralyticsDetectStream, RunUltralyticsSegmentStream
+from detector_interfaces.msg import UltralyticsDetections, UltralyticsSegments
 
 
 class UltralyticsServiceNode(Node):
     def __init__(self) -> None:
         super().__init__('ultralytics_infer_node')
 
-        self.action_name = self.declare_parameter('action_name', '/ultralytics/detect_stream').value
-        self.segment_service_name = self.declare_parameter(
-            'segment_service_name',
-            '/ultralytics/segment',
+        self.detect_action_name = self.declare_parameter('detect_action_name', '/ultralytics/detect_stream').value
+        self.segment_action_name = self.declare_parameter(
+            'segment_action_name',
+            '/ultralytics/segment_stream',
         ).value
         self.input_image_topic = self.declare_parameter(
             'input_image_topic', '/camera/realsense/color/image_rect_raw'
         ).value
         self.output_topic = self.declare_parameter('output_topic', '/ultralytics/detection_results').value
+        self.segment_output_topic = self.declare_parameter(
+            'segment_output_topic',
+            '/ultralytics/segment_results',
+        ).value
         self.default_imgsz = int(self.declare_parameter('default_imgsz', 736).value)
         self.device = self._select_device()
 
@@ -48,11 +51,13 @@ class UltralyticsServiceNode(Node):
         self._last_resolve_time = 0.0
         self._cache_ttl_sec = 30.0
         self._image_cb_group = MutuallyExclusiveCallbackGroup()
-        self._service_cb_group = MutuallyExclusiveCallbackGroup()
+        self._segment_action_cb_group = MutuallyExclusiveCallbackGroup()
         self._action_cb_group = MutuallyExclusiveCallbackGroup()
         self._timer_cb_group = MutuallyExclusiveCallbackGroup()
         self._stream_lock = threading.Lock()
         self._stream_reserved = False
+        self._segment_stream_lock = threading.Lock()
+        self._segment_stream_reserved = False
 
         self._cache_cleanup_timer = self.create_timer(
             1.0, self._cleanup_model_cache, callback_group=self._timer_cb_group
@@ -62,26 +67,33 @@ class UltralyticsServiceNode(Node):
             Image, self.input_image_topic, self._image_callback, 10, callback_group=self._image_cb_group
         )
         self.detection_publisher = self.create_publisher(UltralyticsDetections, self.output_topic, 10)
-        self.stream_action_server = ActionServer(
+        self.segment_publisher = self.create_publisher(UltralyticsSegments, self.segment_output_topic, 10)
+        self.detect_stream_action_server = ActionServer(
             self,
-            RunUltralyticsStream,
-            self.action_name,
+            RunUltralyticsDetectStream,
+            self.detect_action_name,
             execute_callback=self.run_detect_stream,
             goal_callback=self._on_stream_goal,
             cancel_callback=self._on_stream_cancel,
             callback_group=self._action_cb_group,
         )
-        self.create_service(
-            RunUltralyticsSegment,
-            self.segment_service_name,
-            self.run_segment,
-            callback_group=self._service_cb_group,
+        self.segment_stream_action_server = ActionServer(
+            self,
+            RunUltralyticsSegmentStream,
+            self.segment_action_name,
+            execute_callback=self.run_segment_stream,
+            goal_callback=self._on_segment_stream_goal,
+            cancel_callback=self._on_segment_stream_cancel,
+            callback_group=self._segment_action_cb_group,
         )
         self.get_logger().info(
-            f'Ultralytics stream ready on {self.action_name}, image_topic={self.input_image_topic}, '
+            f'Ultralytics detection stream ready on {self.detect_action_name}, image_topic={self.input_image_topic}, '
             f'output_topic={self.output_topic}, device={self.device}, default_imgsz={self.default_imgsz}'
         )
-        self.get_logger().info(f'Ultralytics segmentation service ready on {self.segment_service_name}')
+        self.get_logger().info(
+            f'Ultralytics segmentation stream ready on {self.segment_action_name}, '
+            f'output_topic={self.segment_output_topic}'
+        )
 
     def _select_device(self) -> str:
         device_env = os.environ.get('YOLO_DEVICE')
@@ -170,9 +182,13 @@ class UltralyticsServiceNode(Node):
 
     def _run_detect_model(self, model_path: str, image: np.ndarray, imgsz: int):
         """Run one YOLO detect inference and return flattened detection arrays."""
-        model = self._resolve_model(model_path, task='detect')
-        with self._model_lock:
-            results = model(image, imgsz=imgsz, device=self.device, verbose=False)[0]
+        try:
+            model = self._resolve_model(model_path, task='detect')
+            with self._model_lock:
+                results = model(image, imgsz=imgsz, device=self.device, verbose=False)[0]
+        except Exception as exc:
+            self.get_logger().error(f'YOLO detect inference failed for model {model_path}: {exc}')
+            raise
 
         boxes = getattr(results, 'boxes', None)
         if boxes is None or boxes.conf.numel() == 0:
@@ -188,48 +204,22 @@ class UltralyticsServiceNode(Node):
             boxes.conf.cpu().numpy().astype(np.float32),
         )
 
-    def _publish_detection(
-        self,
-        *,
-        goal_id,
-        model_path: str,
-        frame_seq: int,
-        boxes_xyxy: np.ndarray,
-        class_ids: np.ndarray,
-        confidences: np.ndarray,
-    ) -> None:
-        """Publish one detection result for a stream action goal."""
-        detection_msg = UltralyticsDetections()
-        detection_msg.stamp = self.get_clock().now().to_msg()
-        if goal_id is not None:
-            detection_msg.goal_id = goal_id
-        detection_msg.model_path = model_path
-        detection_msg.frame_seq = int(frame_seq)
-        detection_msg.boxes_xyxy = boxes_xyxy.tolist()
-        detection_msg.class_ids = class_ids.tolist()
-        detection_msg.confidences = confidences.tolist()
-        self.detection_publisher.publish(detection_msg)
+    def _run_segment_model(self, model_path: str, image: np.ndarray, imgsz: int):
+        """Run one YOLO segment inference and return raw boxes and masks."""
+        try:
+            model = self._resolve_model(model_path, task='segment')
+            with self._model_lock:
+                results = model(image, imgsz=imgsz, device=self.device, verbose=False)[0]
+        except Exception as exc:
+            self.get_logger().error(f'YOLO segment inference failed for model {model_path}: {exc}')
+            raise
 
-    def _on_stream_goal(self, goal_request: RunUltralyticsStream.Goal) -> GoalResponse:
-        """Accept one active Ultralytics stream goal at a time."""
-        model_paths = [model_path.strip() for model_path in goal_request.model_paths if model_path.strip()]
-        if not model_paths:
-            self.get_logger().warn('Rejecting Ultralytics stream goal: model_paths is empty')
-            return GoalResponse.REJECT
-
-        with self._stream_lock:
-            if self._stream_reserved:
-                self.get_logger().warn('Rejecting Ultralytics stream goal: another stream is active')
-                return GoalResponse.REJECT
-            self._stream_reserved = True
-            return GoalResponse.ACCEPT
-
-    @staticmethod
-    def _on_stream_cancel(_goal_handle) -> CancelResponse:
-        """Allow clients to stop an active inference stream."""
-        return CancelResponse.ACCEPT
-
-    def run_detect_stream(self, goal_handle) -> RunUltralyticsStream.Result:
+        return getattr(results, 'boxes', None), getattr(results, 'masks', None)
+    
+    ##################
+    ## Detection
+    ##################
+    def run_detect_stream(self, goal_handle) -> RunUltralyticsDetectStream.Result:
         """Run YOLO detection while the action goal is active and publish results to a topic."""
         request = goal_handle.request
         model_paths = [model_path.strip() for model_path in request.model_paths if model_path.strip()]
@@ -239,7 +229,7 @@ class UltralyticsServiceNode(Node):
         frames_processed = 0
         last_processed_image_version = 0
         t_start = time.monotonic()
-        result = RunUltralyticsStream.Result()
+        result = RunUltralyticsDetectStream.Result()
 
         self.get_logger().info(
             f'Ultralytics stream started: models={model_paths}, fps={fps:.2f}, imgsz={imgsz}'
@@ -252,8 +242,8 @@ class UltralyticsServiceNode(Node):
             while rclpy.ok():
                 if goal_handle.is_cancel_requested:
                     goal_handle.canceled()
-                    result.success = False
-                    result.message = 'Stream cancelled'
+                    result.success = True
+                    result.message = 'Stream stopped due to detector side request.'
                     return result
 
                 # Ensure inferenced image is new from image topic
@@ -283,7 +273,7 @@ class UltralyticsServiceNode(Node):
                     )
                 frames_processed += 1
 
-                feedback = RunUltralyticsStream.Feedback()
+                feedback = RunUltralyticsDetectStream.Feedback()
                 feedback.frames_processed = frames_processed
                 feedback.elapsed = float(time.monotonic() - t_start)
                 goal_handle.publish_feedback(feedback)
@@ -312,69 +302,203 @@ class UltralyticsServiceNode(Node):
                 f'Ultralytics stream ended: models={model_paths}, frames={frames_processed}'
             )
 
-    def run_segment(
+    def _publish_detection(
         self,
-        request: RunUltralyticsSegment.Request,
-        response: RunUltralyticsSegment.Response,
-    ):
-        """Run yolo segmentation with the latest subscribed image and return raw masks."""
-        model_path = request.model_path.strip()
-        if not model_path:
-            response.success = False
-            response.message = 'model_path is empty'
-            return response
+        *,
+        goal_id,
+        model_path: str,
+        frame_seq: int,
+        boxes_xyxy: np.ndarray,
+        class_ids: np.ndarray,
+        confidences: np.ndarray,
+    ) -> None:
+        """Publish one detection result for a stream action goal."""
+        detection_msg = UltralyticsDetections()
+        detection_msg.stamp = self.get_clock().now().to_msg()
+        if goal_id is not None:
+            detection_msg.goal_id = goal_id
+        detection_msg.model_path = model_path
+        detection_msg.frame_seq = int(frame_seq)
+        detection_msg.boxes_xyxy = boxes_xyxy.tolist()
+        detection_msg.class_ids = class_ids.tolist()
+        detection_msg.confidences = confidences.tolist()
+        self.detection_publisher.publish(detection_msg)
 
-        with self._image_lock:
-            if self._latest_image is None:
-                response.success = False
-                response.message = f'no image received on topic: {self.input_image_topic}'
-                return response
-            image = self._latest_image.copy()
+    def _on_stream_goal(self, goal_request: RunUltralyticsDetectStream.Goal) -> GoalResponse:
+        """Accept one active Ultralytics stream goal at a time."""
+        model_paths = [model_path.strip() for model_path in goal_request.model_paths if model_path.strip()]
+        if not model_paths:
+            self.get_logger().warn('Rejecting Ultralytics stream goal: model_paths is empty')
+            return GoalResponse.REJECT
 
-        imgsz = int(request.imgsz) if request.imgsz > 0 else self.default_imgsz
+        with self._stream_lock:
+            if self._stream_reserved:
+                self.get_logger().warn('Rejecting Ultralytics stream goal: another stream is active')
+                return GoalResponse.REJECT
+            self._stream_reserved = True
+            return GoalResponse.ACCEPT
+
+    def _on_stream_cancel(self, _goal_handle) -> CancelResponse:
+        """Allow clients to stop an active inference stream."""
+        return CancelResponse.ACCEPT
+
+    ##################
+    ## Segmentation
+    ##################
+    def run_segment_stream(self, goal_handle) -> RunUltralyticsSegmentStream.Result:
+        """Run YOLO segmentation while the action goal is active and publish results to a topic."""
+        request = goal_handle.request
+        model_paths = [model_path.strip() for model_path in request.model_paths if model_path.strip()]
+        imgsz = self.default_imgsz
+        fps = float(request.fps) if request.fps > 0.0 else 15.0
+        period_sec = 1.0 / max(fps, 1e-6)
+        frames_processed = 0
+        last_processed_image_version = 0
+        t_start = time.monotonic()
+        result = RunUltralyticsSegmentStream.Result()
+
+        self.get_logger().info(
+            f'Ultralytics segmentation stream started: models={model_paths}, fps={fps:.2f}, imgsz={imgsz}'
+        )
 
         try:
-            model = self._resolve_model(model_path, task='segment')
-            with self._model_lock:
-                results = model(image, imgsz=imgsz, device=self.device, verbose=False)[0]
+            for model_path in model_paths:
+                self._resolve_model(model_path, task='segment')
 
-            boxes = getattr(results, 'boxes', None)
-            masks = getattr(results, 'masks', None)
-            if boxes is None or boxes.conf.numel() == 0 or masks is None or masks.data.numel() == 0:
-                response.success = True
-                response.message = 'OK'
-                response.boxes_xyxy = []
-                response.class_ids = []
-                response.confidences = []
-                response.masks_data = []
-                response.masks_count = 0
-                response.mask_height = 0
-                response.mask_width = 0
-                return response
+            while rclpy.ok():
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                    result.success = True
+                    result.message = 'Stream stopped due to pose estimator side request.'
+                    return result
 
-            boxes_xyxy = boxes.xyxy.cpu().numpy().astype(np.float32)
-            classes = boxes.cls.cpu().numpy().astype(np.int32)
-            confidences = boxes.conf.cpu().numpy().astype(np.float32)
-            masks_np = masks.data.cpu().numpy()
-            masks_bin = (masks_np > 0.5).astype(np.uint8)
-            mask_count, mask_height, mask_width = masks_bin.shape
+                loop_start = time.monotonic()
+                with self._image_lock:
+                    image_version = self._latest_image_version
+                    if self._latest_image is None or image_version == last_processed_image_version:
+                        image = None
+                    else:
+                        image = self._latest_image.copy()
 
-            response.success = True
-            response.message = 'OK'
-            response.boxes_xyxy = boxes_xyxy.reshape(-1).tolist()
-            response.class_ids = classes.tolist()
-            response.confidences = confidences.tolist()
-            response.masks_data = masks_bin.reshape(-1).tolist()
-            response.masks_count = int(mask_count)
-            response.mask_height = int(mask_height)
-            response.mask_width = int(mask_width)
-            return response
+                if image is None:
+                    time.sleep(min(0.05, period_sec))
+                    continue
+                last_processed_image_version = image_version
+
+                frame_seq = frames_processed + 1
+                for model_path in model_paths:
+                    boxes, masks = self._run_segment_model(model_path, image, imgsz)
+                    if boxes is None or boxes.conf.numel() == 0 or masks is None or masks.data.numel() == 0:
+                        self._publish_segment(
+                            goal_id=goal_handle.goal_id,
+                            model_path=model_path,
+                            frame_seq=frame_seq,
+                            boxes_xyxy=np.empty((0,), dtype=np.float32),
+                            class_ids=np.empty((0,), dtype=np.int32),
+                            confidences=np.empty((0,), dtype=np.float32),
+                            masks_data=np.empty((0,), dtype=np.uint8),
+                            masks_count=0,
+                            mask_height=0,
+                            mask_width=0,
+                        )
+                        continue
+
+                    boxes_xyxy = boxes.xyxy.cpu().numpy().astype(np.float32)
+                    classes = boxes.cls.cpu().numpy().astype(np.int32)
+                    confidences = boxes.conf.cpu().numpy().astype(np.float32)
+                    masks_np = masks.data.cpu().numpy()
+                    masks_bin = (masks_np > 0.5).astype(np.uint8)
+                    mask_count, mask_height, mask_width = masks_bin.shape
+                    self._publish_segment(
+                        goal_id=goal_handle.goal_id,
+                        model_path=model_path,
+                        frame_seq=frame_seq,
+                        boxes_xyxy=boxes_xyxy.reshape(-1),
+                        class_ids=classes,
+                        confidences=confidences,
+                        masks_data=masks_bin.reshape(-1),
+                        masks_count=int(mask_count),
+                        mask_height=int(mask_height),
+                        mask_width=int(mask_width),
+                    )
+                frames_processed += 1
+
+                feedback = RunUltralyticsSegmentStream.Feedback()
+                feedback.frames_processed = frames_processed
+                feedback.elapsed = float(time.monotonic() - t_start)
+                goal_handle.publish_feedback(feedback)
+
+                sleep_sec = period_sec - (time.monotonic() - loop_start)
+                if sleep_sec > 0.0:
+                    time.sleep(sleep_sec)
+
+            goal_handle.abort()
+            result.success = False
+            result.message = 'ROS shutdown'
+            return result
+
         except Exception as exc:
-            response.success = False
-            response.message = f'inference error: {exc}'
-            self.get_logger().error(f'Segmentation failed for model {model_path}: {exc}')
-            return response
+            self.get_logger().error(f'Ultralytics segmentation stream failed for models {model_paths}: {exc}')
+            goal_handle.abort()
+            result.success = False
+            result.message = f'inference error: {exc}'
+            return result
 
+        finally:
+            result.frames_processed = frames_processed
+            with self._segment_stream_lock:
+                self._segment_stream_reserved = False
+            self.get_logger().info(
+                f'Ultralytics segmentation stream ended: models={model_paths}, frames={frames_processed}'
+            )
+
+    def _publish_segment(
+        self,
+        *,
+        goal_id,
+        model_path: str,
+        frame_seq: int,
+        boxes_xyxy: np.ndarray,
+        class_ids: np.ndarray,
+        confidences: np.ndarray,
+        masks_data: np.ndarray,
+        masks_count: int,
+        mask_height: int,
+        mask_width: int,
+    ) -> None:
+        """Publish one segmentation result for a stream action goal."""
+        segment_msg = UltralyticsSegments()
+        segment_msg.stamp = self.get_clock().now().to_msg()
+        if goal_id is not None:
+            segment_msg.goal_id = goal_id
+        segment_msg.model_path = model_path
+        segment_msg.frame_seq = int(frame_seq)
+        segment_msg.boxes_xyxy = boxes_xyxy.tolist()
+        segment_msg.class_ids = class_ids.tolist()
+        segment_msg.confidences = confidences.tolist()
+        segment_msg.masks_data = masks_data.tolist()
+        segment_msg.masks_count = int(masks_count)
+        segment_msg.mask_height = int(mask_height)
+        segment_msg.mask_width = int(mask_width)
+        self.segment_publisher.publish(segment_msg)
+
+    def _on_segment_stream_goal(self, goal_request: RunUltralyticsSegmentStream.Goal) -> GoalResponse:
+        """Accept one active Ultralytics segmentation stream goal at a time."""
+        model_paths = [model_path.strip() for model_path in goal_request.model_paths if model_path.strip()]
+        if not model_paths:
+            self.get_logger().warn('Rejecting Ultralytics segment stream goal: model_paths is empty')
+            return GoalResponse.REJECT
+
+        with self._segment_stream_lock:
+            if self._segment_stream_reserved:
+                self.get_logger().warn('Rejecting Ultralytics segment stream goal: another stream is active')
+                return GoalResponse.REJECT
+            self._segment_stream_reserved = True
+            return GoalResponse.ACCEPT
+        
+    def _on_segment_stream_cancel(self, _goal_handle) -> CancelResponse:
+        """Allow clients to stop an active segmentation stream."""
+        return CancelResponse.ACCEPT
 
 def main(args=None) -> None:
     rclpy.init(args=args)
