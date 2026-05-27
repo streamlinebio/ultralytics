@@ -5,8 +5,6 @@
   <maintainer email="sam@streamlinebio.ai">Sam</maintainer>
   <license>AGPL-3.0</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
-
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
   <depend>detector_interfaces</depend>
